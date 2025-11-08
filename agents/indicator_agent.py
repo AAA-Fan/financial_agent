@@ -19,7 +19,6 @@ def compute_rsi(
     data: Union[pd.Series, pd.DataFrame],
     period: int = 14,
 ) -> Union[pd.Series, pd.DataFrame]:
-    """计算 RSI 指标, 支持 Series 或 DataFrame 输入并返回同类型结果。"""
     if period <= 0:
         raise ValueError("period must be positive")
 
@@ -59,25 +58,6 @@ def fetch_and_calculate_rsi(
     interval: Union[str, Sequence[str]] = ["1d", "5d"],
     rsi_period: int = 14,
 ) -> dict:
-    """
-    从 yfinance 拉取指定股票的历史数据，并计算多时间级别的 RSI 指标。
-
-    参数：
-        ticker: 股票代码，例如 "AAPL"
-        period: 拉取的时间范围，可以是字符串或字符串序列，例如 "1mo", ["1mo", "5d"]
-        interval: 采样频率，可选 ["1m", "5m", "15m", "1h", "1d", "1wk", "1mo"]
-        rsi_period: RSI 的平滑窗口
-
-    返回：
-        dict 包含不同周期的 DataFrame，格式如下：
-        {
-            "ticker": "AAPL",
-            "period": {
-                "1mo": pd.DataFrame(columns=["Date", "Close", "RSI"]),
-                "5d": pd.DataFrame(columns=["Date", "Close", "RSI"])
-            }
-        }
-    """
     try:
         print(f"Fetching {ticker} data from yfinance...")
 
