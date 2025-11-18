@@ -92,7 +92,7 @@ please provide:
                 "stock_symbol": stock_symbol,
                 "recommendation": recommendation_text,
                 "historical_status": historical_analysis.get("status", "unknown"),
-                "indicator_status": indicator_analysis.get("indicator_status", "unknown"),
+                "indicator_status": indicator_analysis.get("status", "unknown"),
                 "news_status": news_analysis.get("status", "unknown"),
                 "status": "success"
             }
@@ -102,7 +102,7 @@ please provide:
                 "stock_symbol": stock_symbol,
                 "recommendation": f"Error generating recommendation: {str(e)}",
                 "historical_status": historical_analysis.get("status", "unknown"),
-                "indicator_status": indicator_analysis.get("indicator_status", "unknown"),
+                "indicator_status": indicator_analysis.get("status", "unknown"),
                 "news_status": news_analysis.get("status", "unknown"),
                 "status": "error"
             }

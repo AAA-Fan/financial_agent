@@ -46,6 +46,7 @@ def example_single_stock():
     # Get news sentiment
     print("Fetching news and analyzing sentiment...")
     news_result = news_agent.analyze(stock_symbol)
+    print(news_result)
     
     # Get recommendation
     print("Generating recommendation...")

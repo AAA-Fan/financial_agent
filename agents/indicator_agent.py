@@ -7,13 +7,23 @@ from langchain.agents import AgentExecutor, create_openai_tools_agent
 from langchain_openai import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.tools import tool
-from langchain_core.messages import HumanMessage
-from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
 from typing import Dict, Any, Union, Sequence
 
-from utils.yfinance_cache import get_historical_data, get_price_history
+from utils.yfinance_cache import get_historical_data
+
+_TIMEFRAME_ALIASES = {
+    "1d": "daily",
+    "daily": "daily",
+    "day": "daily",
+    "1wk": "weekly",
+    "weekly": "weekly",
+    "week": "weekly",
+    "1mo": "monthly",
+    "monthly": "monthly",
+    "month": "monthly",
+}
 
 def compute_rsi(
     data: Union[pd.Series, pd.DataFrame],
@@ -54,30 +64,52 @@ def compute_rsi(
 @tool("fetch_and_calculate_rsi", return_direct=False)
 def fetch_and_calculate_rsi(
     ticker: str = "AAPL",
-    period: int = 30,
-    interval: Union[str, Sequence[str]] = ["1d", "5d"],
+    period: int = 120,
+    intervals: Union[str, Sequence[str]] = ("daily", "weekly", "monthly"),
     rsi_period: int = 14,
 ) -> dict:
+    """
+    Fetch Alpha Vantage data and calculate RSI for daily, weekly, and monthly timeframes.
+
+    Args:
+        ticker (str): Stock ticker symbol (e.g., "AAPL").
+        period (int): Number of most recent points to keep per timeframe.
+        interval (Union[str, Sequence[str]]): Desired timeframes (daily/weekly/monthly). Aliases like "1d" are accepted.
+        rsi_period (int): The period to use for RSI calculation.
+
+    Returns:
+        dict: A dictionary containing RSI values for the specified intervals.
+    """
     try:
-        print(f"Fetching {ticker} data from yfinance...")
+        print(f"Fetching {ticker} data from Alpha Vantage...")
 
-        # fetch data for multiple intervals, because RSI analysis should combine different timeframes
-        requested_interval = [interval] if isinstance(interval, str) else list(interval)
+        def _normalize_timeframes(choice: Union[str, Sequence[str]]) -> list[str]:
+            if isinstance(choice, str):
+                names = [choice]
+            else:
+                names = list(choice) if choice else []
+            if not names:
+                names = ["daily", "weekly", "monthly"]
+            normalized = []
+            for name in names:
+                key = _TIMEFRAME_ALIASES.get(name.lower())
+                if key is None:
+                    raise ValueError(f"Unsupported timeframe '{name}'. Use daily/weekly/monthly.")
+                if key not in normalized:
+                    normalized.append(key)
+            return normalized
+
+        requested_intervals = _normalize_timeframes(intervals)
         interval_frames: Dict[str, pd.DataFrame] = {}
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=period)
 
-        for interval_name in requested_interval:
-            print(f"Calculating RSI for interval: {interval_name}...")
-            df = get_historical_data(ticker, period=period, interval=interval_name)
-            # df = get_price_history(ticker, start_date, end_date, interval_name)
-            print(df)
-
-            if df.empty or "Close" not in df:
-                interval_frames[interval_name] = pd.DataFrame(columns=["Date", "Close", "RSI"])
+        for timeframe in requested_intervals:
+            df = get_historical_data(ticker, interval=timeframe)
+            trimmed = df.tail(max(period, rsi_period + 1))
+            if trimmed.empty or "Close" not in trimmed:
+                interval_frames[timeframe] = pd.DataFrame(columns=["Date", "Close", "RSI"])
                 continue
 
-            close_frame = df[["Close"]].copy()
+            close_frame = trimmed[["Close"]].copy()
             close_frame["RSI"] = compute_rsi(close_frame["Close"], period=rsi_period)
             close_frame = close_frame.reset_index()
 
@@ -85,8 +117,9 @@ def fetch_and_calculate_rsi(
             if date_col != "Date":
                 close_frame = close_frame.rename(columns={date_col: "Date"})
 
-            interval_frames[interval_name] = close_frame[["Date", "Close", "RSI"]]
-            print(interval_frames)
+            interval_frames[timeframe] = close_frame[["Date", "Close", "RSI"]]
+            csv_path = f"data/{ticker}_{timeframe}_rsi.csv"
+            close_frame.to_csv(csv_path, index=False)  # reset_index 后就没有时间索引了
 
         return {"ticker": ticker, "interval": interval_frames}
 
@@ -230,11 +263,8 @@ example_output:
 
 if __name__ == "__main__":
     try:
-        # df = yf.download("AAPL", period="1mo", interval="5d", progress=False)
-        # print(df.tail())
-        # fetch_and_calculate_rsi()
         result = fetch_and_calculate_rsi()
-        print(result['period']['1mo'])
+        print(result["interval"]["daily"].tail())
     except KeyboardInterrupt:
         print("\n\nAnalysis interrupted by user.")
     except Exception as e:

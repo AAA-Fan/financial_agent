@@ -1,98 +1,134 @@
-"""Utilities for caching Yahoo Finance requests across agents."""
+"""Utilities for caching Alpha Vantage requests across agents."""
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
+from io import StringIO
 from threading import RLock
 from typing import Dict, Tuple
 
 import pandas as pd
-import yfinance as yf
+import requests
 
-_download_cache: Dict[Tuple[str, str, str], pd.DataFrame] = {}
-_download_lock = RLock()
-
-_history_cache: Dict[Tuple[str, str, str, str], pd.DataFrame] = {}
-_history_lock = RLock()
-
-_PERIOD_ORDER = [
-    "1d",
-    "5d",
-    "7d",
-    "10d",
-    "14d",
-    "1mo",
-    "60d",
-    "3mo",
-    "6mo",
-    "1y",
-    "2y",
-    "5y",
-    "10y",
-    "ytd",
-    "max",
-]
-_PERIOD_RANK = {name: idx for idx, name in enumerate(_PERIOD_ORDER)}
-
-# Maximum reliable period for each interval according to Yahoo Finance limitations.
-_INTERVAL_MAX_PERIOD = {
-    "1m": "7d",
-    "2m": "60d",
-    "5m": "60d",
-    "15m": "60d",
-    "30m": "60d",
-    "90m": "60d",
+_ALPHA_BASE_URL = "https://www.alphavantage.co/query"
+_ALPHA_PERIOD_FUNCTION = {
+    "daily": "TIME_SERIES_DAILY",
+    "weekly": "TIME_SERIES_WEEKLY",
+    "monthly": "TIME_SERIES_MONTHLY",
+}
+_INTERVAL_ALIASES = {
+    "1d": "daily",
+    "daily": "daily",
+    "day": "daily",
+    "d": "daily",
+    "1w": "weekly",
+    "1wk": "weekly",
+    "weekly": "weekly",
+    "week": "weekly",
+    "w": "weekly",
+    "1mo": "monthly",
+    "monthly": "monthly",
+    "month": "monthly",
+    "m": "monthly",
 }
 
-
-def _normalize_period(period: str, interval: str) -> str:
-    """Ensure requested period is compatible with the interval."""
-    max_period = _INTERVAL_MAX_PERIOD.get(interval)
-    if not max_period:
-        return period
-
-    period_rank = _PERIOD_RANK.get(period, max(_PERIOD_RANK.values()) + 1)
-    max_rank = _PERIOD_RANK.get(max_period, max(_PERIOD_RANK.values()) + 1)
-    if period_rank > max_rank:
-        return max_period
-    return period
+_download_cache: Dict[Tuple[str, str], pd.DataFrame] = {}
+_download_lock = RLock()
 
 
-def get_historical_data(symbol: str, period: str, interval: str = "1d") -> pd.DataFrame:
+def _get_api_key() -> str:
+    """Load Alpha Vantage API key from environment."""
+    key = os.getenv("ALPHAVANTAGE_API_KEY")
+    if not key:
+        raise RuntimeError(
+            "ALPHAVANTAGE_API_KEY is not configured. "
+            "Add it to your environment or .env file."
+        )
+    return key
+
+
+def _normalize_interval(interval: str) -> str:
+    interval_key = interval.lower()
+    if interval_key in _ALPHA_PERIOD_FUNCTION:
+        return interval_key
+    alias = _INTERVAL_ALIASES.get(interval_key)
+    if alias:
+        return alias
+    raise ValueError(
+        f"Unsupported Alpha Vantage period '{interval}'. "
+        "Use one of daily, weekly, or monthly."
+    )
+
+
+def _fetch_alpha_series(symbol: str, interval: str) -> pd.DataFrame:
+    """Retrieve a time series from Alpha Vantage and normalize the response."""
+    params = {
+        "function": _ALPHA_PERIOD_FUNCTION[interval],
+        "symbol": symbol.upper(),
+        "apikey": _get_api_key(),
+        "datatype": "csv",
+    }
+    try:
+        response = requests.get(_ALPHA_BASE_URL, params=params, timeout=30)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Alpha Vantage request failed: {exc}") from exc
+
+    payload = response.text.strip()
+    if not payload:
+        return pd.DataFrame()
+    if payload.startswith("{"):
+        # Alpha Vantage returns JSON for errors even when datatype=csv.
+        raise RuntimeError(f"Alpha Vantage error: {payload}")
+
+    frame = pd.read_csv(StringIO(payload))
+    if frame.empty:
+        return frame
+
+    renamed = frame.rename(
+        columns={
+            "timestamp": "Date",
+            "open": "Open",
+            "high": "High",
+            "low": "Low",
+            "close": "Close",
+            "volume": "Volume",
+        }
+    )
+    renamed["Date"] = pd.to_datetime(renamed["Date"])
+    numeric_cols = ["Open", "High", "Low", "Close", "Volume"]
+    for col in numeric_cols:
+        renamed[col] = pd.to_numeric(renamed[col], errors="coerce")
+
+    normalized = renamed.sort_values("Date").set_index("Date")
+    return normalized
+
+
+def get_historical_data(symbol: str, interval: str = "daily", days: int | None = None) -> pd.DataFrame:
     """
-    Cached wrapper around ``yf.download`` using period/interval arguments.
+    Cached wrapper around Alpha Vantage TIME_SERIES_* endpoints.
 
-    Returns a copy of the cached DataFrame so callers can mutate safely.
+    Args:
+        symbol: Equity ticker symbol.
+        period: One of ``daily``, ``weekly``, ``monthly`` (aliases supported).
+        days: Optional number of most recent rows to return (useful for daily analysis).
     """
-    normalized_period = _normalize_period(period, interval)
-    key = (symbol.upper(), normalized_period, interval)
+    normalized_interval = _normalize_interval(interval)
+    key = (symbol.upper(), normalized_interval)
     with _download_lock:
         cached = _download_cache.get(key)
-    if cached is not None:
-        return cached.copy()
-
-    try:
-        ticker = yf.Ticker(symbol)
-
-        data = ticker.history(
-            period=normalized_period,
-            interval=interval,
-            auto_adjust=False,
-        )
-    except TypeError as err:
-        # Workaround for pandas/yfinance incompatibility when minute data is unavailable.
-        if "Cannot convert numpy.ndarray to numpy.ndarray" in str(err):
-            return pd.DataFrame()
-        raise
-    except Exception:
-        return pd.DataFrame()
-
-    if not data.empty:
+    if cached is None:
+        data = _fetch_alpha_series(symbol, normalized_interval)
         with _download_lock:
             _download_cache[key] = data
-        return data.copy()
+    else:
+        data = cached
 
-    return data
+    result = data.copy()
+    if days is not None and days > 0:
+        result = result.tail(days)
+    return result
 
 
 def get_price_history(
@@ -102,37 +138,20 @@ def get_price_history(
     interval: str = "1d",
 ) -> pd.DataFrame:
     """
-    Cached wrapper around ``yf.download`` using start/end arguments.
+    Provide a historical slice between ``start`` and ``end`` using cached data.
 
-    start/end are stored as ISO strings to create a stable cache key.
+    Since Alpha Vantage does not support arbitrary intervals, ``interval`` is treated
+    as a hint (mapped to daily/weekly/monthly via aliases).
     """
-    key = (symbol.upper(), start.isoformat(), end.isoformat(), interval)
-    with _history_lock:
-        cached = _history_cache.get(key)
-    if cached is not None:
-        return cached.copy()
+    period = _normalize_period(interval)
+    data = get_historical_data(symbol, period=period)
+    if data.empty:
+        return data
 
-    try:
-        ticker = yf.Ticker(symbol)
-        # hist_data = ticker.history(start=start_date, end=end_date)
-        data = ticker.history(
-            start=start,
-            end=end,
-            interval=interval,
-            progress=False,
-            auto_adjust=False,
-            threads=False,
-        )
-    except TypeError as err:
-        if "Cannot convert numpy.ndarray to numpy.ndarray" in str(err):
-            return pd.DataFrame()
-        raise
-    except Exception:
-        return pd.DataFrame()
+    mask = (data.index >= start) & (data.index <= end)
+    return data.loc[mask].copy()
 
-    if not data.empty:
-        with _history_lock:
-            _history_cache[key] = data
-        return data.copy()
 
-    return data
+if __name__ == "__main__":
+    data = get_historical_data("AAPL", "daily", days=30)
+    print(data.tail())

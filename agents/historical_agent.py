@@ -7,12 +7,9 @@ from langchain.agents import AgentExecutor, create_openai_tools_agent
 from langchain_openai import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.tools import tool
-from langchain_core.messages import HumanMessage
-import yfinance as yf
-from datetime import datetime, timedelta
 from typing import Dict, Any
 
-from utils.yfinance_cache import get_price_history, get_historical_data
+from utils.yfinance_cache import get_historical_data
 
 
 @tool
@@ -28,12 +25,15 @@ def fetch_historical_stock_data(symbol: str, days: int = 7) -> str:
         String containing formatted historical data and key statistics
     """
     try:
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=days)
-        hist_data = get_historical_data(symbol)
+        days = max(1, int(days))
+        hist_data = get_historical_data(symbol, interval="daily", days=days)
         
         if hist_data.empty:
+            print(f"No historical data found for {symbol}")
             return f"No historical data found for {symbol}"
+
+        start_date = hist_data.index[0]
+        end_date = hist_data.index[-1]
         
         # Calculate key metrics
         current_price = hist_data['Close'].iloc[-1]
@@ -45,16 +45,12 @@ def fetch_historical_stock_data(symbol: str, days: int = 7) -> str:
         max_price = hist_data['High'].max()
         min_price = hist_data['Low'].min()
         volatility = hist_data['Close'].pct_change().std() * 100
-        
-        # Get company info
-        ticker = yf.Ticker(symbol)
-        info = ticker.info
-        company_name = info.get('longName', symbol)
+        company_name = symbol.upper()
         
         analysis = f"""
 HISTORICAL DATA ANALYSIS FOR {symbol} ({company_name})
 {'='*60}
-Time Period: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')} ({days} days)
+Time Period: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')} (last {len(hist_data)} trading days)
 
 PRICE ANALYSIS:
 - Current Price: ${current_price:.2f}
@@ -86,6 +82,9 @@ TREND INDICATORS:
                 analysis += f"- Recent momentum: Positive ({recent_change:.2f}% in last 3 days)\n"
             else:
                 analysis += f"- Recent momentum: Negative ({recent_change:.2f}% in last 3 days)\n"
+        
+        csv_path = f"data/{symbol}_history_{len(hist_data)}d.csv"
+        hist_data.to_csv(csv_path, index=True)
         
         return analysis
         
